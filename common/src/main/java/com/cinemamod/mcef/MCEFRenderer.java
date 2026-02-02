@@ -26,6 +26,7 @@ import org.lwjgl.system.MemoryUtil;
 
 import java.nio.ByteBuffer;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.lwjgl.opengl.GL12.*;
 import static org.lwjgl.opengl.GL15.*;
@@ -35,27 +36,33 @@ public class MCEFRenderer {
     private final boolean transparent;
     private final int[] textureID = new int[1];
 
-    // PBO for async texture upload
-    private int pboId = 0;
+    // Double-PBO for async texture upload (ping-pong)
+    private final int[] pboIds = new int[2];
+    private int currentPboIndex = 0;
     private boolean pboSupported = true;
 
-    // Thread-safe paint event queue
+    // Thread-safe paint event queue with bounded size
+    private static final int MAX_QUEUED_EVENTS = 4;
     private final ConcurrentLinkedQueue<PaintEvent> paintQueue = new ConcurrentLinkedQueue<>();
+    private final AtomicInteger queueSize = new AtomicInteger(0);
 
     static class PaintEvent {
         final ByteBuffer buffer;
-        final int x, y, width, height;
+        final int destX, destY, width, height;
         final boolean fullUpdate;
         final int unpackRowLength;
+        final int skipPixels, skipRows;
 
-        PaintEvent(ByteBuffer buffer, int x, int y, int width, int height, boolean fullUpdate, int unpackRowLength) {
+        PaintEvent(ByteBuffer buffer, int destX, int destY, int width, int height, boolean fullUpdate, int unpackRowLength, int skipPixels, int skipRows) {
             this.buffer = buffer;
-            this.x = x;
-            this.y = y;
+            this.destX = destX;
+            this.destY = destY;
             this.width = width;
             this.height = height;
             this.fullUpdate = fullUpdate;
             this.unpackRowLength = unpackRowLength;
+            this.skipPixels = skipPixels;
+            this.skipRows = skipRows;
         }
     }
 
@@ -71,8 +78,9 @@ public class MCEFRenderer {
         RenderSystem.bindTexture(0);
 
         try {
-            pboId = glGenBuffers();
-            pboSupported = (pboId != 0);
+            pboIds[0] = glGenBuffers();
+            pboIds[1] = glGenBuffers();
+            pboSupported = (pboIds[0] != 0 && pboIds[1] != 0);
         } catch (Exception e) {
             pboSupported = false;
         }
@@ -92,14 +100,29 @@ public class MCEFRenderer {
         while ((event = paintQueue.poll()) != null) {
             MemoryUtil.memFree(event.buffer);
         }
+        queueSize.set(0);
 
         if (textureID[0] != 0) {
             glDeleteTextures(textureID[0]);
             textureID[0] = 0;
         }
-        if (pboId != 0) {
-            glDeleteBuffers(pboId);
-            pboId = 0;
+        for (int i = 0; i < 2; i++) {
+            if (pboIds[i] != 0) {
+                glDeleteBuffers(pboIds[i]);
+                pboIds[i] = 0;
+            }
+        }
+    }
+
+    private void drainExcessEvents() {
+        while (queueSize.get() > MAX_QUEUED_EVENTS) {
+            PaintEvent old = paintQueue.poll();
+            if (old != null) {
+                MemoryUtil.memFree(old.buffer);
+                queueSize.decrementAndGet();
+            } else {
+                break;
+            }
         }
     }
 
@@ -111,23 +134,48 @@ public class MCEFRenderer {
         ByteBuffer copy = MemoryUtil.memAlloc(buffer.remaining());
         copy.put(buffer.duplicate());
         copy.flip();
-        paintQueue.add(new PaintEvent(copy, 0, 0, width, height, true, width));
+        paintQueue.add(new PaintEvent(copy, 0, 0, width, height, true, width, 0, 0));
+        queueSize.incrementAndGet();
+        drainExcessEvents();
     }
 
     /**
      * Queue a sub-region texture update. Called from the CEF paint callback thread.
-     * The buffer is copied because the CEF buffer is only valid during the callback.
+     * Only copies the rows needed for the dirty rect instead of the entire buffer.
      */
     protected void queueSubPaint(ByteBuffer buffer, int x, int y, int width, int height, int unpackRowLength) {
-        ByteBuffer copy = MemoryUtil.memAlloc(buffer.remaining());
-        copy.put(buffer.duplicate());
+        int bytesPerPixel = 4;
+        int rowBytes = unpackRowLength * bytesPerPixel;
+        int startOffset = y * rowBytes;
+        int copySize = height * rowBytes;
+
+        // Bounds check
+        if (startOffset + copySize > buffer.capacity()) {
+            // Fallback: copy entire buffer if dirty rect is out of bounds
+            ByteBuffer copy = MemoryUtil.memAlloc(buffer.remaining());
+            copy.put(buffer.duplicate());
+            copy.flip();
+            paintQueue.add(new PaintEvent(copy, x, y, width, height, false, unpackRowLength, x, y));
+            queueSize.incrementAndGet();
+            drainExcessEvents();
+            return;
+        }
+
+        ByteBuffer src = buffer.duplicate();
+        src.position(startOffset);
+        src.limit(startOffset + copySize);
+        ByteBuffer copy = MemoryUtil.memAlloc(copySize);
+        copy.put(src);
         copy.flip();
-        paintQueue.add(new PaintEvent(copy, x, y, width, height, false, unpackRowLength));
+        // Buffer now starts at row y, so skipRows = 0, skipPixels = x
+        paintQueue.add(new PaintEvent(copy, x, y, width, height, false, unpackRowLength, x, 0));
+        queueSize.incrementAndGet();
+        drainExcessEvents();
     }
 
     /**
      * Process all queued paint events on the render thread.
-     * Uses a PBO as staging buffer for async GPU upload when available.
+     * Uses double-PBO ping-pong for async GPU upload when available.
      */
     public void processUploads() {
         if (textureID[0] == 0) {
@@ -135,12 +183,14 @@ public class MCEFRenderer {
             PaintEvent event;
             while ((event = paintQueue.poll()) != null) {
                 MemoryUtil.memFree(event.buffer);
+                queueSize.decrementAndGet();
             }
             return;
         }
 
         PaintEvent event;
         while ((event = paintQueue.poll()) != null) {
+            queueSize.decrementAndGet();
             try {
                 if (transparent) RenderSystem.enableBlend();
                 RenderSystem.bindTexture(textureID[0]);
@@ -159,14 +209,19 @@ public class MCEFRenderer {
         }
     }
 
+    private int nextPbo() {
+        int pbo = pboIds[currentPboIndex];
+        currentPboIndex = (currentPboIndex + 1) & 1;
+        return pbo;
+    }
+
     private void uploadFullTexture(PaintEvent event) {
         int dataSize = event.width * event.height * 4;
 
         if (pboSupported) {
             try {
-                // Use PBO as staging buffer: write data then upload from same PBO.
-                // The driver can DMA the data asynchronously after glUnmapBuffer.
-                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pboId);
+                int pbo = nextPbo();
+                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
                 // Orphan the old buffer to avoid sync stalls
                 glBufferData(GL_PIXEL_UNPACK_BUFFER, dataSize, GL_STREAM_DRAW);
                 ByteBuffer mapped = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
@@ -204,7 +259,8 @@ public class MCEFRenderer {
 
         if (pboSupported) {
             try {
-                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pboId);
+                int pbo = nextPbo();
+                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
                 glBufferData(GL_PIXEL_UNPACK_BUFFER, dataSize, GL_STREAM_DRAW);
                 ByteBuffer mapped = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
                 if (mapped != null) {
@@ -213,9 +269,9 @@ public class MCEFRenderer {
 
                     // Upload sub-region from PBO
                     RenderSystem.pixelStore(GL_UNPACK_ROW_LENGTH, event.unpackRowLength);
-                    GlStateManager._pixelStore(GL_UNPACK_SKIP_PIXELS, event.x);
-                    GlStateManager._pixelStore(GL_UNPACK_SKIP_ROWS, event.y);
-                    glTexSubImage2D(GL_TEXTURE_2D, 0, event.x, event.y, event.width, event.height,
+                    GlStateManager._pixelStore(GL_UNPACK_SKIP_PIXELS, event.skipPixels);
+                    GlStateManager._pixelStore(GL_UNPACK_SKIP_ROWS, event.skipRows);
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, event.destX, event.destY, event.width, event.height,
                             GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 0L);
 
                     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
@@ -230,9 +286,9 @@ public class MCEFRenderer {
 
         // Fallback: synchronous upload
         RenderSystem.pixelStore(GL_UNPACK_ROW_LENGTH, event.unpackRowLength);
-        GlStateManager._pixelStore(GL_UNPACK_SKIP_PIXELS, event.x);
-        GlStateManager._pixelStore(GL_UNPACK_SKIP_ROWS, event.y);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, event.x, event.y, event.width, event.height,
+        GlStateManager._pixelStore(GL_UNPACK_SKIP_PIXELS, event.skipPixels);
+        GlStateManager._pixelStore(GL_UNPACK_SKIP_ROWS, event.skipRows);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, event.destX, event.destY, event.width, event.height,
                 GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, event.buffer);
     }
 
