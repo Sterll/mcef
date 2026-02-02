@@ -33,6 +33,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.URL;
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * An API to create Chromium web browsers in Minecraft. Uses
@@ -45,6 +46,7 @@ public final class MCEF {
     private static MCEFClient client;
 
     private static final ArrayList<MCEFInitListener> awaitingInit = new ArrayList<>();
+    private static final CopyOnWriteArrayList<MCEFBrowser> activeBrowsers = new CopyOnWriteArrayList<>();
 
     public static void scheduleForInit(MCEFInitListener task) {
         awaitingInit.add(task);
@@ -172,6 +174,20 @@ public final class MCEF {
             CefUtil.shutdown();
             client = null;
             app = null;
+        }
+    }
+
+    static void registerBrowser(MCEFBrowser browser) {
+        activeBrowsers.add(browser);
+    }
+
+    static void unregisterBrowser(MCEFBrowser browser) {
+        activeBrowsers.remove(browser);
+    }
+
+    public static void processRendererUploads() {
+        for (MCEFBrowser browser : activeBrowsers) {
+            browser.getRenderer().processUploads();
         }
     }
 

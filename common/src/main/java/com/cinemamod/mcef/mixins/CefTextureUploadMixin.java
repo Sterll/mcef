@@ -28,11 +28,14 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(GameRenderer.class)
-public class CefRenderUpdateMixin {
+public class CefTextureUploadMixin {
     @Inject(at = @At("HEAD"), method = "render")
-    public void preRender(float partialTicks, long nanoTime, boolean renderLevel, CallbackInfo ci) {
+    public void onRender(float partialTicks, long nanoTime, boolean renderLevel, CallbackInfo ci) {
         if (MCEF.isInitialized()) {
-            MCEF.getApp().getHandle().N_DoMessageLoopWork();
+            // Pump CEF message loop on the MC render thread (required by CEF thread model)
+            MCEF.getApp().getHandle().pumpMessageLoop();
+            // Process queued texture uploads from CEF paint callbacks
+            MCEF.processRendererUploads();
         }
     }
 }

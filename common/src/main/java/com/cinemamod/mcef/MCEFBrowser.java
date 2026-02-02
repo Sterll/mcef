@@ -21,8 +21,6 @@
 package com.cinemamod.mcef;
 
 import com.cinemamod.mcef.listeners.MCEFCursorChangeListener;
-import com.mojang.blaze3d.platform.GlStateManager;
-import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
 import org.cef.browser.CefBrowser;
 import org.cef.browser.CefBrowserOsr;
@@ -33,13 +31,11 @@ import org.cef.event.CefMouseWheelEvent;
 import org.cef.misc.CefCursorType;
 import org.lwjgl.glfw.GLFW;
 import org.lwjgl.system.MemoryUtil;
-import org.lwjgl.system.libc.LibCString;
 
 import java.awt.*;
 import java.nio.ByteBuffer;
 
 import static org.lwjgl.glfw.GLFW.*;
-import static org.lwjgl.opengl.GL11.*;
 
 /**
  * An instance of an "Off-screen rendered" Chromium web browser.
@@ -90,6 +86,7 @@ public class MCEFBrowser extends CefBrowserOsr {
         cursorChangeListener = (cefCursorID) -> setCursor(CefCursorType.fromId(cefCursorID));
 
         Minecraft.getInstance().submit(renderer::initialize);
+        MCEF.registerBrowser(this);
     }
 
     public MCEFRenderer getRenderer() {
@@ -124,21 +121,30 @@ public class MCEFBrowser extends CefBrowserOsr {
         return dragContext;
     }
 
+    private void freePopupGraphics() {
+        if (popupGraphics != null) {
+            MemoryUtil.memFree(popupGraphics);
+            popupGraphics = null;
+        }
+    }
+
     // Popups
     @Override
     public void onPopupShow(CefBrowser browser, boolean show) {
         super.onPopupShow(browser, show);
         showPopup = show;
-        if (!show) popupDrawn = false;
+        if (!show) {
+            popupDrawn = false;
+            freePopupGraphics();
+        }
     }
 
     @Override
     public void onPopupSize(CefBrowser browser, Rectangle size) {
         super.onPopupSize(browser, size);
         popupSize = size;
-        this.popupGraphics = ByteBuffer.allocateDirect(
-                size.width * size.height * 4
-        );
+        freePopupGraphics();
+        this.popupGraphics = MemoryUtil.memAlloc(size.width * size.height * 4);
     }
 
     // Graphics
@@ -152,47 +158,28 @@ public class MCEFBrowser extends CefBrowserOsr {
             if (lastWidth != width || lastHeight != height) {
                 lastWidth = width;
                 lastHeight = height;
-                // upload full texture
-                // this also sets up the texture size and creates the texture
-                renderer.onPaint(buffer, width, height);
+                renderer.queueFullPaint(buffer, width, height);
             } else {
                 if (renderer.getTextureID() == 0) return;
-                RenderSystem.bindTexture(renderer.getTextureID());
-                RenderSystem.pixelStore(GL_UNPACK_ROW_LENGTH, width);
                 for (Rectangle dirtyRect : dirtyRects) {
-                    GlStateManager._pixelStore(GL_UNPACK_SKIP_PIXELS, dirtyRect.x);
-                    GlStateManager._pixelStore(GL_UNPACK_SKIP_ROWS, dirtyRect.y);
-                    renderer.onPaint(buffer, dirtyRect.x, dirtyRect.y, dirtyRect.width, dirtyRect.height);
+                    renderer.queueSubPaint(buffer, dirtyRect.x, dirtyRect.y, dirtyRect.width, dirtyRect.height, width);
                 }
                 if ((popupDrawn || showPopup) && popupSize != null) {
-                    // interpret where the popup was as a dirty rect
                     if (!showPopup) {
-                        // if the popup is not visible, just draw the contents of the buffer
-                        GlStateManager._pixelStore(GL_UNPACK_SKIP_PIXELS, popupSize.width);
-                        GlStateManager._pixelStore(GL_UNPACK_SKIP_ROWS, popupSize.height);
-                        renderer.onPaint(buffer, popupSize.x, popupSize.y, popupSize.width, popupSize.height);
-                        popupGraphics = null;
+                        renderer.queueSubPaint(buffer, popupSize.x, popupSize.y, popupSize.width, popupSize.height, width);
+                        freePopupGraphics();
                         popupSize = null;
-                    } else if (popupDrawn) {
-                        // else, a use copy of the popup graphics, as it needs to remain visible
-                        // and for some reason that I do not for the life of me understand, chromium does not seem to keep this data in memory outside of the paint loop, meaning it has to be copied around, which wastes performance
-                        RenderSystem.pixelStore(GL_UNPACK_ROW_LENGTH, popupSize.width);
-                        GlStateManager._pixelStore(GL_UNPACK_SKIP_PIXELS, 0);
-                        GlStateManager._pixelStore(GL_UNPACK_SKIP_ROWS, 0);
-                        renderer.onPaint(popupGraphics, popupSize.x, popupSize.y, popupSize.width, popupSize.height);
+                    } else if (popupDrawn && popupGraphics != null) {
+                        renderer.queueSubPaint(popupGraphics, popupSize.x, popupSize.y, popupSize.width, popupSize.height, popupSize.width);
                     }
                 }
             }
         } else {
             if (renderer.getTextureID() == 0) return;
-            RenderSystem.bindTexture(renderer.getTextureID());
             int start = buffer.capacity();
             int end = 0;
             for (Rectangle dirtyRect : dirtyRects) {
-                RenderSystem.pixelStore(GL_UNPACK_ROW_LENGTH, popupSize.width);
-                GlStateManager._pixelStore(GL_UNPACK_SKIP_PIXELS, dirtyRect.x);
-                GlStateManager._pixelStore(GL_UNPACK_SKIP_ROWS, dirtyRect.y);
-                renderer.onPaint(buffer, popupSize.x + dirtyRect.x, popupSize.y + dirtyRect.y, dirtyRect.width, dirtyRect.height);
+                renderer.queueSubPaint(buffer, popupSize.x + dirtyRect.x, popupSize.y + dirtyRect.y, dirtyRect.width, dirtyRect.height, popupSize.width);
 
                 int rectStart = (dirtyRect.x + ((dirtyRect.y) * popupSize.width)) << 2;
                 if (rectStart < start) start = rectStart;
@@ -204,7 +191,6 @@ public class MCEFBrowser extends CefBrowserOsr {
             if (end > buffer.capacity()) end = buffer.capacity();
 
             if (end > start) {
-                // TODO: check if it's more performant to go for row-wise copies or if it's better to just copy the updated region
                 if (this.popupGraphics != null) {
                     long addrFrom = MemoryUtil.memAddress(buffer);
                     long addrTo = MemoryUtil.memAddress(popupGraphics);
@@ -403,6 +389,8 @@ public class MCEFBrowser extends CefBrowserOsr {
 
     // Closing
     public void close() {
+        MCEF.unregisterBrowser(this);
+        freePopupGraphics();
         renderer.cleanup();
         cursorChangeListener.onCursorChange(0);
         super.close(true);
@@ -410,6 +398,7 @@ public class MCEFBrowser extends CefBrowserOsr {
 
     @Override
     protected void finalize() throws Throwable {
+        MCEF.unregisterBrowser(this);
         Minecraft.getInstance().submit(renderer::cleanup);
         super.finalize();
     }
