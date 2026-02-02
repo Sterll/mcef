@@ -27,10 +27,10 @@ public class MCEFDownloadListener {
     @Unique
     public static final MCEFDownloadListener INSTANCE = new MCEFDownloadListener();
 
-    private String task;
-    private float percent;
-    private boolean done;
-    private boolean failed;
+    private volatile String task;
+    private volatile float percent;
+    private volatile boolean done;
+    private volatile boolean failed;
 
     public void setTask(String name) {
         this.task = name;

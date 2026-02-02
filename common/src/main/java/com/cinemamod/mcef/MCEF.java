@@ -33,7 +33,9 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.URL;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * An API to create Chromium web browsers in Minecraft. Uses
@@ -41,11 +43,12 @@ import java.util.concurrent.CopyOnWriteArrayList;
  */
 public final class MCEF {
     public static final Logger LOGGER = LoggerFactory.getLogger("MCEF");
-    private static MCEFSettings settings;
-    private static MCEFApp app;
-    private static MCEFClient client;
+    private static volatile MCEFSettings settings;
+    private static volatile MCEFApp app;
+    private static volatile MCEFClient client;
 
-    private static final ArrayList<MCEFInitListener> awaitingInit = new ArrayList<>();
+    private static final AtomicBoolean shutdownInProgress = new AtomicBoolean(false);
+    private static final CopyOnWriteArrayList<MCEFInitListener> awaitingInit = new CopyOnWriteArrayList<>();
     private static final CopyOnWriteArrayList<MCEFBrowser> activeBrowsers = new CopyOnWriteArrayList<>();
 
     public static void scheduleForInit(MCEFInitListener task) {
@@ -170,10 +173,13 @@ public final class MCEF {
      * Request a shutdown of MCEF/CEF. Nothing will happen if not initialized.
      */
     public static void shutdown() {
-        if (isInitialized()) {
-            CefUtil.shutdown();
-            client = null;
-            app = null;
+        if (isInitialized() && shutdownInProgress.compareAndSet(false, true)) {
+            try {
+                CefUtil.shutdown();
+            } finally {
+                client = null;
+                app = null;
+            }
         }
     }
 
@@ -249,10 +255,7 @@ public final class MCEF {
      * Helper method to get a GLFW cursor handle for the given {@link CefCursorType} cursor type
      */
     static long getGLFWCursorHandle(CefCursorType cursorType) {
-        if (CEF_TO_GLFW_CURSORS.containsKey(cursorType)) return CEF_TO_GLFW_CURSORS.get(cursorType);
-        long glfwCursorHandle = GLFW.glfwCreateStandardCursor(cursorType.glfwId);
-        CEF_TO_GLFW_CURSORS.put(cursorType, glfwCursorHandle);
-        return glfwCursorHandle;
+        return CEF_TO_GLFW_CURSORS.computeIfAbsent(cursorType, type -> GLFW.glfwCreateStandardCursor(type.glfwId));
     }
-    private static final HashMap<CefCursorType, Long> CEF_TO_GLFW_CURSORS = new HashMap<>();
+    private static final ConcurrentHashMap<CefCursorType, Long> CEF_TO_GLFW_CURSORS = new ConcurrentHashMap<>();
 }
