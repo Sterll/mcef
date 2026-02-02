@@ -50,6 +50,7 @@ public final class MCEF {
     private static final AtomicBoolean shutdownInProgress = new AtomicBoolean(false);
     private static final CopyOnWriteArrayList<MCEFInitListener> awaitingInit = new CopyOnWriteArrayList<>();
     private static final CopyOnWriteArrayList<MCEFBrowser> activeBrowsers = new CopyOnWriteArrayList<>();
+    private static final CopyOnWriteArrayList<MCEFBrowserWorld> worldBrowsers = new CopyOnWriteArrayList<>();
 
     public static void scheduleForInit(MCEFInitListener task) {
         awaitingInit.add(task);
@@ -189,6 +190,25 @@ public final class MCEF {
 
     static void unregisterBrowser(MCEFBrowser browser) {
         activeBrowsers.remove(browser);
+    }
+
+    public static MCEFBrowserWorld createWorldBrowser(String url, boolean transparent, double x, double y, double z, float width, float height) {
+        MCEFBrowser browser = createBrowser(url, transparent);
+        MCEFBrowserWorld worldBrowser = new MCEFBrowserWorld(browser, x, y, z, width, height);
+        worldBrowsers.add(worldBrowser);
+        return worldBrowser;
+    }
+
+    public static void registerWorldBrowser(MCEFBrowserWorld browser) {
+        worldBrowsers.add(browser);
+    }
+
+    public static void unregisterWorldBrowser(MCEFBrowserWorld browser) {
+        worldBrowsers.remove(browser);
+    }
+
+    public static List<MCEFBrowserWorld> getWorldBrowsers() {
+        return Collections.unmodifiableList(worldBrowsers);
     }
 
     public static void processRendererUploads() {
