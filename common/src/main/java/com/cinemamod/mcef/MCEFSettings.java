@@ -42,12 +42,14 @@ public class MCEFSettings {
     private String downloadMirror;
     private String userAgent;
     private boolean useCache;
+    private int windowlessFrameRate;
 
     public MCEFSettings() {
         skipDownload = false;
         downloadMirror = "https://mcef-download.cinemamod.com";
         userAgent = null;
         useCache = true;
+        windowlessFrameRate = 60;
     }
 
     public boolean isSkipDownload() {
@@ -86,6 +88,15 @@ public class MCEFSettings {
         saveAsync();
     }
 
+    public int getWindowlessFrameRate() {
+        return windowlessFrameRate;
+    }
+
+    public void setWindowlessFrameRate(int windowlessFrameRate) {
+        this.windowlessFrameRate = Math.max(1, Math.min(60, windowlessFrameRate));
+        saveAsync();
+    }
+
     public void saveAsync() {
         CompletableFuture.runAsync(() -> {
             try {
@@ -110,6 +121,7 @@ public class MCEFSettings {
         properties.setProperty("download-mirror", String.valueOf(downloadMirror));
         properties.setProperty("user-agent", String.valueOf(userAgent));
         properties.setProperty("use-cache", String.valueOf(useCache));
+        properties.setProperty("windowless-frame-rate", String.valueOf(windowlessFrameRate));
 
         try (FileOutputStream output = new FileOutputStream(file)) {
             properties.store(output, null);
@@ -134,6 +146,8 @@ public class MCEFSettings {
             downloadMirror = properties.getProperty("download-mirror");
             userAgent = properties.getProperty("user-agent");
             useCache = Boolean.parseBoolean(properties.getProperty("use-cache"));
+            String frameRateStr = properties.getProperty("windowless-frame-rate");
+            if (frameRateStr != null) windowlessFrameRate = Math.max(1, Math.min(60, Integer.parseInt(frameRateStr)));
         } catch (Exception e) {
             // Delete and re-create the file if there was a parsing error
             if (deleteRetries++ > 20)

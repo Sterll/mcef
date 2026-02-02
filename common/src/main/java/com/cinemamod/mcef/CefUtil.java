@@ -111,6 +111,8 @@ final class CefUtil {
             cefSettings.user_agent_product = "MCEF/2";
         }
 
+        cefSettings.windowless_frame_rate = settings.getWindowlessFrameRate();
+
         cefAppInstance = CefApp.getInstance(cefSwitches, cefSettings);
         cefClientInstance = cefAppInstance.createClient();
 
