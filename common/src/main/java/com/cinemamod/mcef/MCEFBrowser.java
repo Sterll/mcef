@@ -371,7 +371,7 @@ public class MCEFBrowser extends CefBrowserOsr {
 
     // Expose drag & drop functions
     public void startDragging(CefDragData dragData, int mask, int x, int y) { // Overload since the JCEF method requires a browser, which then goes unused
-        startDragging(dragData, mask, x, y);
+        startDragging(this, dragData, mask, x, y);
     }
 
     public void finishDragging(int x, int y) {
