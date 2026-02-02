@@ -31,7 +31,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.HashSet;
-import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -45,10 +44,17 @@ final class CefUtil {
     private static CefApp cefAppInstance;
     private static CefClient cefClientInstance;
 
-    private static final Path CACHE_PATH = Minecraft.getInstance().gameDirectory
-            .toPath()
-            .resolve("mods")
-            .resolve("mcef-cache");
+    private static volatile Path cachePath;
+
+    private static Path getCachePath() {
+        if (cachePath == null) {
+            cachePath = Minecraft.getInstance().gameDirectory
+                    .toPath()
+                    .resolve("mods")
+                    .resolve("mcef-cache");
+        }
+        return cachePath;
+    }
 
     private static void setUnixExecutable(File file) {
         Set<PosixFilePermission> perms = new HashSet<>();
@@ -100,10 +106,10 @@ final class CefUtil {
 
         CefSettings cefSettings = new CefSettings();
         cefSettings.windowless_rendering_enabled = true;
-        if (settings.isUsingCache()) cefSettings.cache_path = CACHE_PATH.toAbsolutePath().toString(); // jcef wants an absolute path, so make sure it's absolute
+        if (settings.isUsingCache()) cefSettings.cache_path = getCachePath().toAbsolutePath().toString(); // jcef wants an absolute path, so make sure it's absolute
         cefSettings.background_color = cefSettings.new ColorType(0, 255, 255, 255);
         // Set the user agent if there's one defined in MCEFSettings
-        if (!Objects.equals(settings.getUserAgent(), "null")) {
+        if (settings.getUserAgent() != null) {
             cefSettings.user_agent = settings.getUserAgent();
         } else {
             // If there is no custom defined user agent, set a user agent product.

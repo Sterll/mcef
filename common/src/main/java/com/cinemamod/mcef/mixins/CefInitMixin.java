@@ -85,11 +85,6 @@ public abstract class CefInitMixin {
                     MCEF.getLogger().debug("MCEF already finished downloading, scheduling loading.");
                     Minecraft.getInstance().execute((() -> {
                         MCEF.getLogger().debug("MCEF is attempting to load.");
-                        try {
-                            Thread.sleep(1000);
-                        } catch (InterruptedException e) {
-                            MCEF.getLogger().error("I don't even know what occurred here.", e);
-                        }
                         MCEF.initialize();
                     }));
                 }

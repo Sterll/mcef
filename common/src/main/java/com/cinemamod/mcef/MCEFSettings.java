@@ -31,11 +31,18 @@ import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 
 public class MCEFSettings {
-    private static final Path PATH = Minecraft.getInstance().gameDirectory
-            .toPath()
-            .resolve("config")
-            .resolve("mcef")
-            .resolve("mcef.properties");
+    private static volatile Path path;
+
+    private static Path getPath() {
+        if (path == null) {
+            path = Minecraft.getInstance().gameDirectory
+                    .toPath()
+                    .resolve("config")
+                    .resolve("mcef")
+                    .resolve("mcef.properties");
+        }
+        return path;
+    }
     private static int deleteRetries = 0;
 
     private boolean skipDownload;
@@ -108,7 +115,7 @@ public class MCEFSettings {
     }
 
     public void save() throws IOException {
-        File file = PATH.toFile();
+        File file = getPath().toFile();
 
         file.getParentFile().mkdirs();
 
@@ -119,7 +126,7 @@ public class MCEFSettings {
         Properties properties = new Properties();
         properties.setProperty("skip-download", String.valueOf(skipDownload));
         properties.setProperty("download-mirror", String.valueOf(downloadMirror));
-        properties.setProperty("user-agent", String.valueOf(userAgent));
+        if (userAgent != null) properties.setProperty("user-agent", userAgent);
         properties.setProperty("use-cache", String.valueOf(useCache));
         properties.setProperty("windowless-frame-rate", String.valueOf(windowlessFrameRate));
 
@@ -129,7 +136,7 @@ public class MCEFSettings {
     }
 
     public void load() throws IOException {
-        File file = PATH.toFile();
+        File file = getPath().toFile();
 
         if (!file.exists()) {
             save();
@@ -144,7 +151,8 @@ public class MCEFSettings {
         try {
             skipDownload = Boolean.parseBoolean(properties.getProperty("skip-download"));
             downloadMirror = properties.getProperty("download-mirror");
-            userAgent = properties.getProperty("user-agent");
+            String ua = properties.getProperty("user-agent");
+            userAgent = (ua != null && !ua.equals("null")) ? ua : null;
             useCache = Boolean.parseBoolean(properties.getProperty("use-cache"));
             String frameRateStr = properties.getProperty("windowless-frame-rate");
             if (frameRateStr != null) windowlessFrameRate = Math.max(1, Math.min(60, Integer.parseInt(frameRateStr)));
