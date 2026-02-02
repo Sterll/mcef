@@ -46,6 +46,7 @@ public final class MCEF {
     private static volatile MCEFSettings settings;
     private static volatile MCEFApp app;
     private static volatile MCEFClient client;
+    private static volatile MCEFBrowserPool browserPool;
 
     private static final AtomicBoolean shutdownInProgress = new AtomicBoolean(false);
     private static final CopyOnWriteArrayList<MCEFInitListener> awaitingInit = new CopyOnWriteArrayList<>();
@@ -85,6 +86,7 @@ public final class MCEF {
         if (CefUtil.init()) {
             app = new MCEFApp(CefUtil.getCefApp());
             client = new MCEFClient(CefUtil.getCefClient());
+            browserPool = new MCEFBrowserPool(getSettings().getBrowserPoolSize());
 
             awaitingInit.forEach(t -> t.onInit(true));
             awaitingInit.clear();
@@ -163,6 +165,43 @@ public final class MCEF {
     }
 
     /**
+     * Acquire a reusable browser from the pool, or create a new one if the pool is empty.
+     * Use {@link #releaseBrowser(MCEFBrowser)} to return it to the pool instead of closing it.
+     * @param url the starting URL
+     * @param transparent whether the browser uses transparent rendering
+     * @return the {@link MCEFBrowser} web browser instance
+     */
+    public static MCEFBrowser acquireBrowser(String url, boolean transparent) {
+        assertInitialized();
+        return browserPool.acquire(url, transparent);
+    }
+
+    /**
+     * Acquire a reusable browser from the pool with explicit dimensions.
+     * Use {@link #releaseBrowser(MCEFBrowser)} to return it to the pool instead of closing it.
+     * @param url the starting URL
+     * @param transparent whether the browser uses transparent rendering
+     * @param width desired width in pixels
+     * @param height desired height in pixels
+     * @return the {@link MCEFBrowser} web browser instance
+     */
+    public static MCEFBrowser acquireBrowser(String url, boolean transparent, int width, int height) {
+        assertInitialized();
+        return browserPool.acquire(url, transparent, width, height);
+    }
+
+    /**
+     * Return a browser to the pool for future reuse. The browser will be navigated
+     * to {@code about:blank} and its state reset. If the pool is full, the browser
+     * is closed normally instead.
+     * @param browser the browser to release back to the pool
+     */
+    public static void releaseBrowser(MCEFBrowser browser) {
+        assertInitialized();
+        browserPool.release(browser);
+    }
+
+    /**
      * Check if MCEF is initialized.
      * @return true if MCEF is initialized correctly, false if not
      */
@@ -176,6 +215,10 @@ public final class MCEF {
     public static void shutdown() {
         if (isInitialized() && shutdownInProgress.compareAndSet(false, true)) {
             try {
+                if (browserPool != null) {
+                    browserPool.shutdown();
+                    browserPool = null;
+                }
                 CefUtil.shutdown();
             } finally {
                 client = null;

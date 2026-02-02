@@ -50,6 +50,7 @@ public class MCEFSettings {
     private String userAgent;
     private boolean useCache;
     private int windowlessFrameRate;
+    private int browserPoolSize;
 
     public MCEFSettings() {
         skipDownload = false;
@@ -57,6 +58,7 @@ public class MCEFSettings {
         userAgent = null;
         useCache = true;
         windowlessFrameRate = 60;
+        browserPoolSize = 4;
     }
 
     public boolean isSkipDownload() {
@@ -104,6 +106,15 @@ public class MCEFSettings {
         saveAsync();
     }
 
+    public int getBrowserPoolSize() {
+        return browserPoolSize;
+    }
+
+    public void setBrowserPoolSize(int browserPoolSize) {
+        this.browserPoolSize = Math.max(0, Math.min(8, browserPoolSize));
+        saveAsync();
+    }
+
     public void saveAsync() {
         CompletableFuture.runAsync(() -> {
             try {
@@ -129,6 +140,7 @@ public class MCEFSettings {
         if (userAgent != null) properties.setProperty("user-agent", userAgent);
         properties.setProperty("use-cache", String.valueOf(useCache));
         properties.setProperty("windowless-frame-rate", String.valueOf(windowlessFrameRate));
+        properties.setProperty("browser-pool-size", String.valueOf(browserPoolSize));
 
         try (FileOutputStream output = new FileOutputStream(file)) {
             properties.store(output, null);
@@ -156,6 +168,8 @@ public class MCEFSettings {
             useCache = Boolean.parseBoolean(properties.getProperty("use-cache"));
             String frameRateStr = properties.getProperty("windowless-frame-rate");
             if (frameRateStr != null) windowlessFrameRate = Math.max(1, Math.min(60, Integer.parseInt(frameRateStr)));
+            String poolSizeStr = properties.getProperty("browser-pool-size");
+            if (poolSizeStr != null) browserPoolSize = Math.max(0, Math.min(8, Integer.parseInt(poolSizeStr)));
         } catch (Exception e) {
             // Delete and re-create the file if there was a parsing error
             if (deleteRetries++ > 20)
