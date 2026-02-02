@@ -179,12 +179,8 @@ public class MCEFRenderer {
      */
     public void processUploads() {
         if (textureID[0] == 0) {
-            // Drain and free if texture not ready
-            PaintEvent event;
-            while ((event = paintQueue.poll()) != null) {
-                MemoryUtil.memFree(event.buffer);
-                queueSize.decrementAndGet();
-            }
+            // Texture not ready yet; keep events in queue for next frame.
+            // The queue is bounded by MAX_QUEUED_EVENTS via drainExcessEvents().
             return;
         }
 
