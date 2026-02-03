@@ -63,6 +63,10 @@ public class MCEFClient implements CefLoadHandler, CefContextMenuHandler, CefDis
         loadHandlers.add(handler);
     }
 
+    public void removeLoadHandler(CefLoadHandler handler) {
+        loadHandlers.remove(handler);
+    }
+
     @Override
     public void onLoadingStateChange(CefBrowser browser, boolean isLoading, boolean canGoBack, boolean canGoForward) {
         for (CefLoadHandler loadHandler : loadHandlers)
