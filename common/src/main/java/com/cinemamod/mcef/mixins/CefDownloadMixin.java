@@ -88,6 +88,13 @@ public class CefDownloadMixin {
             MCEF.getLogger().info("java-cef commit: " + javaCefCommit);
 
             MCEFSettings settings = MCEF.getSettings();
+
+            if (settings.isSkipDownload()) {
+                MCEF.getLogger().info("Skipping JCEF download (skip-download=true)");
+                MCEFDownloadListener.INSTANCE.setDone(true);
+                return;
+            }
+
             MCEFDownloader downloader = new MCEFDownloader(settings.getDownloadMirror(), javaCefCommit, MCEFPlatform.getPlatform());
 
             boolean downloadJcefBuild;
@@ -99,7 +106,16 @@ public class CefDownloadMixin {
                 downloadJcefBuild = !downloader.downloadJavaCefChecksum();
             } catch (IOException e) {
                 MCEF.getLogger().error("Failed to download JCEF checksum.", e);
-                MCEFDownloadListener.INSTANCE.setFailed(true);
+
+                // Fallback: if binaries already exist locally, skip download and continue
+                File localBinaries = new File(System.getProperty("jcef.path"));
+                if (localBinaries.exists() && localBinaries.isDirectory() && localBinaries.list().length > 0) {
+                    MCEF.getLogger().warn("Checksum download failed but local binaries found, continuing with existing installation");
+                    MCEFDownloadListener.INSTANCE.setDone(true);
+                } else {
+                    MCEF.getLogger().error("No local JCEF binaries found and checksum download failed");
+                    MCEFDownloadListener.INSTANCE.setFailed(true);
+                }
                 return;
             }
 
@@ -108,7 +124,7 @@ public class CefDownloadMixin {
             File mcefLibrariesDir = new File(System.getProperty("mcef.libraries.path"));
             downloadJcefBuild |= !mcefLibrariesDir.exists();
 
-            if (downloadJcefBuild && !settings.isSkipDownload()) {
+            if (downloadJcefBuild) {
                 try {
                     downloader.downloadJavaCefBuild();
                 } catch (IOException e) {
