@@ -382,6 +382,7 @@ public class MCEFBrowser extends CefBrowserOsr {
     }
 
     public void cancelDrag() {
+        if (!dragContext.isDragging()) return;
         dragTargetDragLeave();
         dragContext.stopDragging();
         this.onCursorChange(this, dragContext.getActualCursor());
