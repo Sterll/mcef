@@ -91,11 +91,11 @@ final class CefUtil {
         String[] cefSwitches = new String[]{
                 "--autoplay-policy=no-user-gesture-required",
                 "--disable-web-security",
-                "--enable-widevine-cdm" // https://canary.discord.com/channels/985588552735809696/992495232035868682/1151704612924039218
-                // TODO: should probably make this configurable
-                //       based off this page: https://magpcss.org/ceforum/viewtopic.php?f=6&t=11672
-                //       it seems the solution to the white screen is to add the "--disable-gpu" switch
-                //       but that shouldn't be done on all devices, so either we need to figure out a pattern and setup code to add the switch based off that, or add it as a config, if that is the case
+                "--enable-widevine-cdm",
+                // Performance: GPU compositing is unnecessary for off-screen rendering
+                "--disable-gpu-compositing",
+                // Performance: disable CEF vsync since Minecraft controls frame timing
+                "--disable-gpu-vsync"
         };
 
         if (!CefApp.startup(cefSwitches)) {

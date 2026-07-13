@@ -22,6 +22,7 @@ package com.cinemamod.mcef;
 
 import com.cinemamod.mcef.listeners.MCEFInitListener;
 import net.minecraft.client.Minecraft;
+import org.cef.browser.CefMessageRouter;
 import org.cef.misc.CefCursorType;
 import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
@@ -34,6 +35,7 @@ import java.io.InputStreamReader;
 import java.net.URL;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -47,11 +49,25 @@ public final class MCEF {
     private static volatile MCEFApp app;
     private static volatile MCEFClient client;
     private static volatile MCEFBrowserPool browserPool;
+    private static volatile CefMessageRouter defaultMessageRouter;
 
     private static final AtomicBoolean shutdownInProgress = new AtomicBoolean(false);
     private static final CopyOnWriteArrayList<MCEFInitListener> awaitingInit = new CopyOnWriteArrayList<>();
     private static final CopyOnWriteArrayList<MCEFBrowser> activeBrowsers = new CopyOnWriteArrayList<>();
     private static final CopyOnWriteArrayList<MCEFBrowserWorld> worldBrowsers = new CopyOnWriteArrayList<>();
+
+    // --- Message-loop pump reentrancy barrier --------------------------------
+    // CEF runs a single-threaded message loop that is pumped every render frame
+    // (see CefTextureUploadMixin -> pumpMessageLoop()). Native callbacks
+    // (onPaint, cefQuery, load events) are dispatched DURING that pump. Mutating
+    // browser lifecycle (loadURL/resize/close) or CEF handler lists while a pump
+    // is in flight can free a native peer whose queued task is still pending,
+    // producing a use-after-free that manifests as EXCEPTION_ACCESS_VIOLATION
+    // inside N_DoMessageLoopWork. Such operations are serialized: if issued
+    // while a pump is running they are deferred and executed (same thread) as
+    // soon as the pump returns.
+    private static volatile boolean pumping = false;
+    private static final ConcurrentLinkedQueue<Runnable> deferredOps = new ConcurrentLinkedQueue<>();
 
     public static void scheduleForInit(MCEFInitListener task) {
         awaitingInit.add(task);
@@ -86,7 +102,24 @@ public final class MCEF {
         if (CefUtil.init()) {
             app = new MCEFApp(CefUtil.getCefApp());
             client = new MCEFClient(CefUtil.getCefClient());
+            // Register a default CefMessageRouter config on the CefClient BEFORE
+            // creating any browsers. This ensures the router config is in
+            // BrowserProcessHandler's static set, so when pooled browsers are created,
+            // the config is passed via extra_info to the render process, and
+            // window.cefQuery JS bindings are injected into V8 contexts from the start.
+            // Without this, pooled browsers would never have cefQuery available because
+            // they were created before any mod registers its own router.
+            defaultMessageRouter = CefMessageRouter.create(new CefMessageRouter.CefMessageRouterConfig());
+            client.getHandle().addMessageRouter(defaultMessageRouter);
+
             browserPool = new MCEFBrowserPool(getSettings().getBrowserPoolSize());
+
+            // Pre-warm the browser pool asynchronously to start the Chromium subprocess early
+            Thread warmUpThread = new Thread(() -> {
+                browserPool.warmUp(client, getSettings().getBrowserPoolSize());
+            }, "MCEF-WarmUp");
+            warmUpThread.setDaemon(true);
+            warmUpThread.start();
 
             awaitingInit.forEach(t -> t.onInit(true));
             awaitingInit.clear();
@@ -137,12 +170,30 @@ public final class MCEF {
     }
 
     /**
+     * Get the default {@link CefMessageRouter} that is registered on the CefClient
+     * at initialization. Mods should add/remove their handlers on this router
+     * rather than creating separate routers, to avoid conflicts with pooled browsers.
+     * @return the default CefMessageRouter
+     */
+    public static CefMessageRouter getMessageRouter() {
+        assertInitialized();
+        return defaultMessageRouter;
+    }
+
+    /**
      * Will assert that MCEF has been initialized; throws a {@link RuntimeException} if not.
      * Creates a new Chromium web browser with some starting URL. Can set it to be transparent rendering.
      * @return the {@link MCEFBrowser} web browser instance
      */
     public static MCEFBrowser createBrowser(String url, boolean transparent) {
         assertInitialized();
+        if (browserPool != null) {
+            MCEFBrowser pooled = browserPool.pollMatchingBrowser(transparent);
+            if (pooled != null) {
+                pooled.loadURL(url);
+                return pooled;
+            }
+        }
         MCEFBrowser browser = new MCEFBrowser(client, url, transparent);
         browser.setCloseAllowed();
         browser.createImmediately();
@@ -157,6 +208,14 @@ public final class MCEF {
      */
     public static MCEFBrowser createBrowser(String url, boolean transparent, int width, int height) {
         assertInitialized();
+        if (browserPool != null) {
+            MCEFBrowser pooled = browserPool.pollMatchingBrowser(transparent);
+            if (pooled != null) {
+                pooled.loadURL(url);
+                pooled.resize(width, height);
+                return pooled;
+            }
+        }
         MCEFBrowser browser = new MCEFBrowser(client, url, transparent);
         browser.setCloseAllowed();
         browser.createImmediately();
@@ -198,7 +257,58 @@ public final class MCEF {
      */
     public static void releaseBrowser(MCEFBrowser browser) {
         assertInitialized();
-        browserPool.release(browser);
+        runSafely(() -> browserPool.release(browser));
+    }
+
+    /**
+     * @return {@code true} while a CEF message-loop pump is in progress. Native
+     * callbacks (onPaint / cefQuery / load events) run during this window.
+     */
+    public static boolean isPumping() {
+        return pumping;
+    }
+
+    /**
+     * Run an operation that mutates CEF/browser native state safely with respect
+     * to the message-loop pump. If a pump is currently in flight the operation is
+     * deferred and executed as soon as the pump finishes (on the same, render
+     * thread); otherwise it runs immediately. Prevents use-after-free crashes in
+     * {@code N_DoMessageLoopWork} caused by tearing down or re-navigating a
+     * browser (or mutating a CEF handler list) mid-pump.
+     */
+    public static void runSafely(Runnable op) {
+        if (op == null) return;
+        if (pumping) {
+            deferredOps.add(op);
+        } else {
+            op.run();
+        }
+    }
+
+    /**
+     * Pump the CEF message loop with a reentrancy barrier. Called every render
+     * frame by {@code CefTextureUploadMixin}. Any lifecycle mutation issued from
+     * within a native callback during the pump is deferred (see
+     * {@link #runSafely(Runnable)}) and drained here once the pump returns, so no
+     * native peer is freed while a queued task still references it.
+     */
+    public static void pumpMessageLoop() {
+        if (!isInitialized()) return;
+        pumping = true;
+        try {
+            app.getHandle().pumpMessageLoop();
+        } finally {
+            pumping = false;
+        }
+        // Drain deferred lifecycle ops now that no pump is in flight.
+        Runnable op;
+        while ((op = deferredOps.poll()) != null) {
+            try {
+                op.run();
+            } catch (Throwable t) {
+                LOGGER.error("Deferred MCEF op failed", t);
+            }
+        }
     }
 
     /**
@@ -218,6 +328,13 @@ public final class MCEF {
                 if (browserPool != null) {
                     browserPool.shutdown();
                     browserPool = null;
+                }
+                if (defaultMessageRouter != null) {
+                    if (client != null) {
+                        try { client.getHandle().removeMessageRouter(defaultMessageRouter); } catch (Exception ignored) {}
+                    }
+                    defaultMessageRouter.dispose();
+                    defaultMessageRouter = null;
                 }
                 CefUtil.shutdown();
             } finally {

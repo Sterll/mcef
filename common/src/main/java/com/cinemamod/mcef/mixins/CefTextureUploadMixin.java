@@ -32,8 +32,12 @@ public class CefTextureUploadMixin {
     @Inject(at = @At("HEAD"), method = "render")
     public void onRender(float partialTicks, long nanoTime, boolean renderLevel, CallbackInfo ci) {
         if (MCEF.isInitialized()) {
-            // Pump CEF message loop on the MC render thread (required by CEF thread model)
-            MCEF.getApp().getHandle().pumpMessageLoop();
+            // Pump CEF message loop on the MC render thread (required by CEF thread
+            // model). Goes through MCEF.pumpMessageLoop() which wraps the native
+            // pump in a reentrancy barrier so browser lifecycle mutations triggered
+            // from within a native callback are deferred until the pump returns
+            // (prevents use-after-free crashes in N_DoMessageLoopWork).
+            MCEF.pumpMessageLoop();
             // Process queued texture uploads from CEF paint callbacks
             MCEF.processRendererUploads();
         }

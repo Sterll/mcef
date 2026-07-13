@@ -95,27 +95,27 @@ public class CefDownloadMixin {
                 return;
             }
 
+            // Fast path: if JCEF binaries already exist locally, skip network checks entirely
+            File localBinaries = new File(System.getProperty("jcef.path"));
+            if (localBinaries.exists() && localBinaries.isDirectory()) {
+                String[] files = localBinaries.list();
+                if (files != null && files.length > 0) {
+                    MCEF.getLogger().info("JCEF binaries found locally, skipping download check");
+                    MCEFDownloadListener.INSTANCE.setDone(true);
+                    return;
+                }
+            }
+
             MCEFDownloader downloader = new MCEFDownloader(settings.getDownloadMirror(), javaCefCommit, MCEFPlatform.getPlatform());
 
             boolean downloadJcefBuild;
 
-            // We always download the checksum for the java-cef build
-            // We will compare this with mcef-libraries/<platform>.tar.gz.sha256
-            // If the contents of the files differ (or it doesn't exist locally), we know we need to redownload JCEF
             try {
                 downloadJcefBuild = !downloader.downloadJavaCefChecksum();
             } catch (IOException e) {
                 MCEF.getLogger().error("Failed to download JCEF checksum.", e);
-
-                // Fallback: if binaries already exist locally, skip download and continue
-                File localBinaries = new File(System.getProperty("jcef.path"));
-                if (localBinaries.exists() && localBinaries.isDirectory() && localBinaries.list().length > 0) {
-                    MCEF.getLogger().warn("Checksum download failed but local binaries found, continuing with existing installation");
-                    MCEFDownloadListener.INSTANCE.setDone(true);
-                } else {
-                    MCEF.getLogger().error("No local JCEF binaries found and checksum download failed");
-                    MCEFDownloadListener.INSTANCE.setFailed(true);
-                }
+                MCEF.getLogger().error("No local JCEF binaries found and checksum download failed");
+                MCEFDownloadListener.INSTANCE.setFailed(true);
                 return;
             }
 
@@ -137,7 +137,8 @@ public class CefDownloadMixin {
             }
 
             MCEFDownloadListener.INSTANCE.setDone(true);
-        });
+        }, "MCEF-Download");
+        downloadThread.setDaemon(true);
         downloadThread.start();
     }
 }

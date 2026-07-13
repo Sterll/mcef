@@ -72,6 +72,13 @@ public class MCEFBrowser extends CefBrowserOsr {
      * CEF is a bit odd and implements mouse buttons as a part of modifier flags.
      */
     private int btnMask = 0;
+    /**
+     * Set once {@link #close()} has begun. The native browser is destroyed
+     * asynchronously, so CEF may still deliver onPaint after close() returns.
+     * Painting into a renderer whose GL texture/buffers are being freed is a
+     * use-after-free; this flag short-circuits any late callback.
+     */
+    private volatile boolean closed = false;
 
     // Data relating to popups and graphics
     // Marked as protected in-case a mod wants to extend MCEFBrowser and override the repaint logic
@@ -150,6 +157,10 @@ public class MCEFBrowser extends CefBrowserOsr {
     // Graphics
     @Override
     public void onPaint(CefBrowser browser, boolean popup, Rectangle[] dirtyRects, ByteBuffer buffer, int width, int height) {
+        // Browser is being torn down: its renderer's GL texture/native buffers
+        // may already be freed. Ignore any late paint to avoid a use-after-free.
+        if (closed)
+            return;
         // nothing to update
         if (dirtyRects.length == 0)
             return;
@@ -161,8 +172,21 @@ public class MCEFBrowser extends CefBrowserOsr {
                 renderer.queueFullPaint(buffer, width, height);
             } else {
                 if (renderer.getTextureID() == 0) return;
+                // Coalesce all dirty rects into a single bounding rect
+                int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE;
+                int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE;
                 for (Rectangle dirtyRect : dirtyRects) {
-                    renderer.queueSubPaint(buffer, dirtyRect.x, dirtyRect.y, dirtyRect.width, dirtyRect.height, width);
+                    minX = Math.min(minX, dirtyRect.x);
+                    minY = Math.min(minY, dirtyRect.y);
+                    maxX = Math.max(maxX, dirtyRect.x + dirtyRect.width);
+                    maxY = Math.max(maxY, dirtyRect.y + dirtyRect.height);
+                }
+                minX = Math.max(0, minX);
+                minY = Math.max(0, minY);
+                maxX = Math.min(width, maxX);
+                maxY = Math.min(height, maxY);
+                if (maxX > minX && maxY > minY) {
+                    renderer.queueSubPaint(buffer, minX, minY, maxX - minX, maxY - minY, width);
                 }
                 if ((popupDrawn || showPopup) && popupSize != null) {
                     if (!showPopup) {
@@ -176,30 +200,34 @@ public class MCEFBrowser extends CefBrowserOsr {
             }
         } else {
             if (renderer.getTextureID() == 0) return;
-            int start = buffer.capacity();
-            int end = 0;
+            // Coalesce popup dirty rects into a single bounding rect
+            int pMinX = Integer.MAX_VALUE, pMinY = Integer.MAX_VALUE;
+            int pMaxX = Integer.MIN_VALUE, pMaxY = Integer.MIN_VALUE;
             for (Rectangle dirtyRect : dirtyRects) {
-                renderer.queueSubPaint(buffer, popupSize.x + dirtyRect.x, popupSize.y + dirtyRect.y, dirtyRect.width, dirtyRect.height, popupSize.width);
-
-                int rectStart = (dirtyRect.x + ((dirtyRect.y) * popupSize.width)) << 2;
-                if (rectStart < start) start = rectStart;
-
-                int rectEnd = ((dirtyRect.x + dirtyRect.width) + ((dirtyRect.y + popupSize.height) * dirtyRect.width)) << 2;
-                if (rectEnd > end) end = rectEnd;
+                pMinX = Math.min(pMinX, dirtyRect.x);
+                pMinY = Math.min(pMinY, dirtyRect.y);
+                pMaxX = Math.max(pMaxX, dirtyRect.x + dirtyRect.width);
+                pMaxY = Math.max(pMaxY, dirtyRect.y + dirtyRect.height);
             }
+            pMinX = Math.max(0, pMinX);
+            pMinY = Math.max(0, pMinY);
+            pMaxX = Math.min(popupSize.width, pMaxX);
+            pMaxY = Math.min(popupSize.height, pMaxY);
+
+            if (pMaxX > pMinX && pMaxY > pMinY) {
+                renderer.queueSubPaint(buffer, popupSize.x + pMinX, popupSize.y + pMinY, pMaxX - pMinX, pMaxY - pMinY, popupSize.width);
+            }
+
+            // Copy bounding region to popup graphics cache
+            int start = (pMinX + pMinY * popupSize.width) << 2;
+            int end = (pMaxX + (pMaxY - 1) * popupSize.width) << 2;
             if (start < 0) start = 0;
             if (end > buffer.capacity()) end = buffer.capacity();
 
-            if (end > start) {
-                if (this.popupGraphics != null) {
-                    long addrFrom = MemoryUtil.memAddress(buffer);
-                    long addrTo = MemoryUtil.memAddress(popupGraphics);
-                    MemoryUtil.memCopy(
-                            addrFrom + start,
-                            addrTo + start,
-                            (end - start)
-                    );
-                }
+            if (end > start && this.popupGraphics != null) {
+                long addrFrom = MemoryUtil.memAddress(buffer);
+                long addrTo = MemoryUtil.memAddress(popupGraphics);
+                MemoryUtil.memCopy(addrFrom + start, addrTo + start, (end - start));
             }
 
             popupDrawn = true;
@@ -207,6 +235,7 @@ public class MCEFBrowser extends CefBrowserOsr {
     }
 
     public void resize(int width, int height) {
+        if (closed) return;
         browser_rect_.setBounds(0, 0, width, height);
         wasResized(width, height);
     }
@@ -390,6 +419,8 @@ public class MCEFBrowser extends CefBrowserOsr {
 
     // Closing
     public void close() {
+        if (closed) return;
+        closed = true;
         MCEF.unregisterBrowser(this);
         freePopupGraphics();
         renderer.cleanup();

@@ -123,31 +123,30 @@ public class MCEFDownloader {
 
             URL url = new URL(urlString);
             HttpURLConnection urlConnection = (HttpURLConnection) url.openConnection();
+            urlConnection.setConnectTimeout(10_000);
+            urlConnection.setReadTimeout(10_000);
 
             if (urlConnection.getResponseCode() != 200) {
-                throw new IOException();
+                throw new IOException("HTTP " + urlConnection.getResponseCode());
             }
 
             int fileSize = urlConnection.getContentLength();
-
-            BufferedInputStream inputStream = new BufferedInputStream(url.openStream());
-            FileOutputStream outputStream = new FileOutputStream(outputFile);
-
-            byte[] buffer = new byte[2048];
+            byte[] buffer = new byte[65536];
             int count;
             int readBytes = 0;
-            while ((count = inputStream.read(buffer)) != -1) {
-                outputStream.write(buffer, 0, count);
-                readBytes += count;
-                float percentComplete = (float) readBytes / fileSize;
-                MCEFDownloadListener.INSTANCE.setProgress(percentComplete);
-                buffer = new byte[Math.max(2048, inputStream.available())];
-            }
 
-            inputStream.close();
-            outputStream.close();
+            try (BufferedInputStream inputStream = new BufferedInputStream(urlConnection.getInputStream(), 65536);
+                 BufferedOutputStream outputStream = new BufferedOutputStream(new FileOutputStream(outputFile), 65536)) {
+                while ((count = inputStream.read(buffer)) != -1) {
+                    outputStream.write(buffer, 0, count);
+                    readBytes += count;
+                    if (fileSize > 0) {
+                        MCEFDownloadListener.INSTANCE.setProgress((float) readBytes / fileSize);
+                    }
+                }
+            }
         } catch (IOException e) {
-            throw new IOException("Failed to download " + urlString);
+            throw new IOException("Failed to download " + urlString, e);
         }
     }
 
@@ -158,8 +157,10 @@ public class MCEFDownloader {
 
         long fileSize = tarGzFile.length();
         long totalBytesRead = 0;
+        byte[] buffer = new byte[65536];
 
-        try (TarArchiveInputStream tarInput = new TarArchiveInputStream(new GzipCompressorInputStream(new FileInputStream(tarGzFile)))) {
+        try (TarArchiveInputStream tarInput = new TarArchiveInputStream(
+                new GzipCompressorInputStream(new BufferedInputStream(new FileInputStream(tarGzFile), 65536)))) {
             TarArchiveEntry entry;
             while ((entry = tarInput.getNextTarEntry()) != null) {
                 if (entry.isDirectory()) {
@@ -169,15 +170,13 @@ public class MCEFDownloader {
                 File outputFile = new File(outputDirectory, entry.getName());
                 outputFile.getParentFile().mkdirs();
 
-                try (OutputStream outputStream = new FileOutputStream(outputFile)) {
-                    byte[] buffer = new byte[4096];
+                try (BufferedOutputStream outputStream = new BufferedOutputStream(new FileOutputStream(outputFile), 65536)) {
                     int bytesRead;
                     while ((bytesRead = tarInput.read(buffer)) != -1) {
                         outputStream.write(buffer, 0, bytesRead);
                         totalBytesRead += bytesRead;
-                        float percentComplete = (((float) totalBytesRead / fileSize) / 2.6158204f); // Roughly the compression ratio
+                        float percentComplete = (((float) totalBytesRead / fileSize) / 2.6158204f);
                         MCEFDownloadListener.INSTANCE.setProgress(percentComplete);
-                        buffer = new byte[Math.max(4096, tarInput.available())];
                     }
                 }
             }

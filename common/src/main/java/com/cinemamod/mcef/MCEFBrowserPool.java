@@ -57,7 +57,8 @@ public class MCEFBrowserPool {
         if (maxPoolSize > 0) {
             MCEFBrowser browser = pollMatchingBrowser(transparent);
             if (browser != null) {
-                browser.loadURL(url);
+                // Defer navigation out of an in-flight message-loop pump.
+                MCEF.runSafely(() -> browser.loadURL(url));
                 return browser;
             }
         }
@@ -77,8 +78,11 @@ public class MCEFBrowserPool {
         if (maxPoolSize > 0) {
             MCEFBrowser browser = pollMatchingBrowser(transparent);
             if (browser != null) {
-                browser.loadURL(url);
-                browser.resize(width, height);
+                // Defer navigation + resize out of an in-flight message-loop pump.
+                MCEF.runSafely(() -> {
+                    browser.loadURL(url);
+                    browser.resize(width, height);
+                });
                 return browser;
             }
         }
@@ -100,24 +104,44 @@ public class MCEFBrowserPool {
         browser.setFocus(false);
 
         if (maxPoolSize > 0 && availableBrowsers.size() < maxPoolSize) {
-            browser.loadURL("about:blank");
+            // Defer navigation out of an in-flight message-loop pump.
+            MCEF.runSafely(() -> browser.loadURL("about:blank"));
             availableBrowsers.add(browser);
         } else {
-            browser.close();
+            // Defer native destruction out of an in-flight message-loop pump so
+            // no queued task references the freed native peer (UAF guard).
+            MCEF.runSafely(browser::close);
         }
     }
 
     /**
-     * Shut down the pool: close all pooled browsers and clear the queue.
+     * Pre-create browsers in the pool to warm up the Chromium subprocess.
+     * The first browser creation starts the subprocess (slow); subsequent
+     * creations reuse it (fast). Call this right after CEF initialization.
      */
-    public void shutdown() {
-        MCEFBrowser browser;
-        while ((browser = availableBrowsers.poll()) != null) {
-            browser.close();
+    public void warmUp(MCEFClient client, int count) {
+        if (maxPoolSize <= 0 || count <= 0) return;
+        int toCreate = Math.min(count, maxPoolSize);
+        MCEF.getLogger().info("Pre-warming " + toCreate + " browser(s) in pool...");
+        for (int i = 0; i < toCreate; i++) {
+            MCEFBrowser browser = new MCEFBrowser(client, "about:blank", true);
+            browser.setCloseAllowed();
+            browser.createImmediately();
+            availableBrowsers.add(browser);
         }
+        MCEF.getLogger().info("Browser pool warm-up complete");
     }
 
-    private MCEFBrowser pollMatchingBrowser(boolean transparent) {
+    /**
+     * Shut down the pool. Just clear the queue — CefUtil.shutdown() handles
+     * native resource cleanup. Calling browser.close() here would trigger
+     * GL/GLFW calls from the shutdown thread, which crashes.
+     */
+    public void shutdown() {
+        availableBrowsers.clear();
+    }
+
+    MCEFBrowser pollMatchingBrowser(boolean transparent) {
         // Iterate to find a browser with matching transparency
         int size = availableBrowsers.size();
         for (int i = 0; i < size; i++) {
